@@ -1,0 +1,81 @@
+exports.name = 'workbench';
+
+exports.apply = function apply(ctx) {
+  var root = document.createElement('section');
+  root.id = 'workbench';
+  root.setAttribute('aria-label', 'Workbench creation studio');
+  root.innerHTML = '<style>#workbench{position:fixed;z-index:100;inset:7vh 4vw 6vh 26vw;overflow:auto;background:#e8ebef;border:1px solid #a7afb9;border-radius:16px;box-shadow:0 22px 60px #07111e55;font:14px/1.5 system-ui,sans-serif}#workbench *{box-sizing:border-box}#workbench .workbench-body{display:grid;grid-template-columns:1.1fr 1fr;min-height:440px}#workbench [data-module]{min-width:0}#workbench button{cursor:pointer}#workbench h1{font-size:26px;margin:0}#workbench canvas{width:100%;height:auto}@media(max-width:1000px){#workbench{inset:8vh 2vw 4vh 22vw}#workbench .workbench-body{grid-template-columns:1fr}}</style><header data-module="navigation"></header><div class="workbench-body"><main data-module="editor"></main><aside data-module="preview"></aside></div>';
+  var entries = new Set();
+  var desired;
+  var stopped = false;
+  var timer;
+
+  function register(id) {
+    var slot = root.querySelector('[data-module="' + id + '"]');
+    var active;
+    var serial = 0;
+    var disposed = false;
+    async function update(state) {
+      var ticket = ++serial;
+      var release = state.release;
+      var status = 'ready';
+      var loaded;
+      try {
+        loaded = await import('/workbench-assets/' + id + '/' + release + '.mjs?delivery=' + state.delivery);
+      } catch (error) {
+        release = 'one';
+        status = 'fallback';
+        console.warn('[workbench] ' + id + ': requested ' + state.release + ', using ' + release, error);
+        try {
+          loaded = await import('/workbench-assets/' + id + '/' + release + '.mjs?delivery=' + state.delivery);
+        } catch (fallbackError) {
+          console.error('[workbench] ' + id + ': no usable release', fallbackError);
+          return;
+        }
+      }
+      if (disposed || ticket !== serial) return;
+      if (!active || active.release !== release) {
+        var staging = document.createElement('div');
+        var dispose = loaded.mount(staging);
+        if (active) active.dispose();
+        slot.replaceChildren(...staging.childNodes);
+        active = { release: release, dispose: dispose };
+      }
+      slot.dataset.release = release;
+      slot.dataset.status = status;
+    }
+    var entry = { update: update };
+    entries.add(entry);
+    if (desired) update(desired);
+    return function () {
+      disposed = true;
+      serial++;
+      entries.delete(entry);
+      if (active) active.dispose();
+      slot.replaceChildren();
+    };
+  }
+
+  ctx.provide('lanternWorkbench', { register: register });
+  ctx.effect(function () {
+    document.body.appendChild(root);
+    async function poll() {
+      try {
+        var response = await fetch('/api/workbench/state', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Workspace state unavailable');
+        var state = await response.json();
+        if (stopped) return;
+        if (!desired || state.release !== desired.release || state.delivery !== desired.delivery) {
+          desired = state;
+          root.dataset.release = state.release;
+          entries.forEach(function (entry) { entry.update(state); });
+        }
+      } catch (error) {
+        if (!stopped) console.warn('[workbench] Update check failed', error);
+      }
+      if (!stopped) timer = setTimeout(poll, 700);
+    }
+    poll();
+    return function () { stopped = true; clearTimeout(timer); root.remove(); };
+  });
+};
